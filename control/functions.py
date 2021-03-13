@@ -34,7 +34,7 @@ class Drift_linear(Func):
         self.L=L
         self.M=M
 
-    def __call__(self, t, x, a):
+    def __call__(self, x, a):
         """Returns Lx + Ma
         Parameters
         ----------
@@ -55,7 +55,7 @@ class Drift_linear(Func):
         Ma = torch.matmul(self.M, a.unsqueeze(2)) # (batch_size, d, 1)
         return (Lx+Ma).squeeze(2) # (batch_size, d)
 
-    def dx(self, t, x, a):
+    def dx(self, x, a):
         pass
 
 
@@ -64,10 +64,10 @@ class Diffusion_constant(Func):
     def __init__(self, sigma):
         self.sigma = sigma
 
-    def __call__(self, t, x):
+    def __call__(self, x):
         return torch.ones_like(x)*self.sigma # (batch_size, d)
 
-    def dx(self, t, x):
+    def dx(self, x):
         pass
 
 
@@ -79,7 +79,7 @@ class Hamiltonian(Func):
         self.diffusion = diffusion
         self.running_cost = running_cost
 
-    def __call__(self, t, x, a, y, z):
+    def __call__(self, x, a, y, z):
         """
         Parameters
         ----------
@@ -97,15 +97,15 @@ class Hamiltonian(Func):
         ----
         I'm considering the diffuion of the SDE to be diagonal
         """
-        diffusion_z = torch.bmm(self.diffusion(t,x).unsqueeze(1), z) # (batch_size,1,d). I'm considering the diffusion to be diagonal!
+        diffusion_z = torch.bmm(self.diffusion(x).unsqueeze(1), z) # (batch_size,1,d). I'm considering the diffusion to be diagonal!
         trace_diffusion_z = torch.sum(diffusion_z, 2) # (batch_size, 1) 
-        H = torch.sum(self.drift(t,x,a)*y,1,keepdim=True) + trace_diffusion_z + self.running_cost(x,a) 
+        H = torch.sum(self.drift(x,a)*y,1,keepdim=True) + trace_diffusion_z + self.running_cost(x,a) 
         return H #(batch_size, 1)
     
     
-    def dx(self, t, x, a, y, z, create_graph, retain_graph):
+    def dx(self, x, a, y, z, create_graph, retain_graph):
         x.requires_grad_(True)
-        H = self.__call__(t,x,a,y,z)
+        H = self.__call__(x,a,y,z)
         dHdx = torch.autograd.grad(H,x,grad_outputs=torch.ones_like(H),only_inputs=True, create_graph=create_graph, retain_graph=retain_graph)[0]
         return dHdx # (batch_size, d)
 
