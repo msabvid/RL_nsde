@@ -5,7 +5,7 @@ from typing import Tuple, Optional, List
 from abc import abstractmethod
 
 from ..lib.networks import FFN
-from .functions import Func, Hamiltonian, Drift_linear, Diffusion_constant, QuadraticRuningCost, QuadraticFinalCost
+from .functions import Hamiltonian, Drift_linear, Diffusion_constant, QuadraticRuningCost, QuadraticFinalCost
 
 
 
@@ -123,7 +123,7 @@ class Controlled_NSDE(nn.Module):
         Z = self.Z(tx).view(batch_size, len(ts), self.d, self.d) # (batch_size, L, d, d)
         loss_fn = nn.MSELoss()
         loss = 0
-        # we get the local errors of the bsde to solve it for the processes Y and Z
+        # we get the local errors of the bsde to solve it, i.e. find parametrisation of the processes Y and Z
         final_value = self.final_cost.dx(x[:,-1,:], create_graph=False, retain_graph=False) # final value of the bsde, (batch_size, d)
         for idx,t in enumerate(ts):
             if t==ts[-1]:

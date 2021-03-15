@@ -139,10 +139,12 @@ class QuadraticFinalCost(Func):
         return xRx.squeeze(2) # (batch_size, 1)
     
     def dx(self, x, create_graph, retain_graph):
-        x.requires_grad_(True)
-        g = self.__call__(x)
-        dgdx = torch.autograd.grad(g,x,grad_outputs=torch.ones_like(g), only_inputs=True, create_graph=create_graph, retain_graph=retain_graph)[0]
-        return dgdx
+        #x.requires_grad_(True)
+        #g = self.__call__(x)
+        #dgdx = torch.autograd.grad(g,x,grad_outputs=torch.ones_like(g), only_inputs=True, create_graph=create_graph, retain_graph=retain_graph)[0]
+        #return dgdx
+        Rx = torch.matmul(self.R, x.unsqueeze(2)).squeeze(2) # (batch_size, d) 
+        return 2*Rx
 
 
 class QuadraticRunningCost(Func):
