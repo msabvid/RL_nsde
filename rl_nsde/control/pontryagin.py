@@ -5,7 +5,7 @@ from typing import Tuple, Optional, List
 from abc import abstractmethod
 
 from ..lib.networks import FFN
-from .functions import Hamiltonian, Drift_linear, Diffusion_constant, QuadraticRuningCost, QuadraticFinalCost
+from .functions import Hamiltonian, Drift_linear, Diffusion_constant, QuadraticRunningCost, QuadraticFinalCost
 
 
 
@@ -39,7 +39,7 @@ class Controlled_NSDE(nn.Module):
     def _diffusion(self, **kwargs):
         ...
 
-    @abtsractmethod
+    @abstractmethod
     def _running_cost(self, **kwargs):
         ...
 
@@ -82,7 +82,7 @@ class Controlled_NSDE(nn.Module):
         rewards = torch.zeros(batch_size, len(ts), 1)
         for idx, t in enumerate(ts[:-1]):
             h = ts[idx+1]-ts[idx]
-            a = self.alpha(x)
+            a = self.alpha(x_old)
             # store action and reward
             actions[:,idx,:] = a
             rewards[:,idx,:] = self.running_cost(x_old, a)  
@@ -133,7 +133,7 @@ class Controlled_NSDE(nn.Module):
                 h = ts[idx+1] - ts[idx]
                 y = Y[:,idx,:]
                 with torch.no_grad():
-                    a = self.alpha(x)
+                    a = self.alpha(x[:,idx,:])
                 z = Z[:,idx,:]
                 stoch_int = torch.bmm(Z[:,idx,...], brownian_increments[:,idx,:].unsqueeze(2)).squeeze(2) # (batch_size, d)
                 dHdx = self.H.dx(x=x[:,idx,:],
@@ -173,7 +173,7 @@ class Controlled_NSDE(nn.Module):
         for idx, t in enumerate(ts):
             current_t = t*torch.ones(batch_size, 1, device=device)
             y = Y[:,idx,:]
-            a = self.alpha(x)
+            a = self.alpha(x[:,idx,:])
             z = Z[:,idx,:]
             H = self.H(x=x[:,idx,:],a=a,y=y,z=z)
             loss += H
@@ -195,7 +195,7 @@ class LQR(Controlled_NSDE):
             hidden sizes of the Feedforward networks that parametrise the policy, Y, Z
         kwargs: Dict with config of LQR
         """
-        super(Controlled_NSDE, self).__init__()
+        super().__init__(d=d, ffn_hidden=ffn_hidden, **kwargs)
     
     def _drift(self, **kwargs):
         return Drift_linear(L=kwargs['L'], M=kwargs['M'])
@@ -212,23 +212,15 @@ class LQR(Controlled_NSDE):
 
 class RL_IRL_NSDE(Controlled_NSDE):    
     
-        """
-        We want to learn everything from the data:
-            - The drift and the diffusion of the nsde
-            - The optimal policy
-            - The running cost and the final cost
-        
-        Paramters
-        ---------
-        d: int
-            dim of the process
-        ffn_hidden: List[int]
-            hidden sizes of the Feedforward networks that parametrise the policy, Y, Z
-        lqr_config: Dict with config of LQR
-        """
+    """
+    We want to learn everything from the data:
+        - The drift and the diffusion of the nsde
+        - The optimal policy
+        - The running cost and the final cost
+    """
 
-    def __init__(self, d, ffn_hidden, **kwargs)
-        super(Controlled_NSDE, self).__init__()
+    def __init__(self, d, ffn_hidden, **kwargs):
+        super().__init__(d=d, ffn_hidden=ffn_hidden, **kwargs)
 
     def _drift(self, **kwargs):
         return FFN(sizes=[self.d+self.d] + self.ffn_hidden + [self.d])
@@ -245,23 +237,17 @@ class RL_IRL_NSDE(Controlled_NSDE):
 
 class RL_NSDE(Controlled_NSDE):    
     
-        """
-        Model-based RL. We learn the following from the data:
-            - The drift and the diffusion of the snde
-            - The optimal policy
-        The running cost and the final cost are given.
+    """
+    Model-based RL. We learn the following from the data:
+        - The drift and the diffusion of the snde
+        - The optimal policy
+    The running cost and the final cost are given.
 
-        Paramters
-        ---------
-        d: int
-            dim of the process
-        ffn_hidden: List[int]
-            hidden sizes of the Feedforward networks that parametrise the policy, Y, Z
-        lqr_config: Dict with config of LQR
-        """
+    lqr_config: Dict with config of LQR
+    """
     
-    def __init__(self, d, ffn_hidden, **kwargs)
-        super(Controlled_NSDE, self).__init__()
+    def __init__(self, d, ffn_hidden, **kwargs):
+        super().__init__(d=d, ffn_hidden=ffn_hidden, **kwargs)
 
     def _drift(self, **kwargs):
         return FFN(sizes=[self.d+self.d] + self.ffn_hidden + [self.d])

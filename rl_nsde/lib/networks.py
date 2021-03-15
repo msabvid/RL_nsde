@@ -28,7 +28,10 @@ class FFN(nn.Module):
         dgdx = torch.autograd(g, x, grad_outputs=torch.ones_like(g), only_inputs=True, create_graph=create_graph, retain_graph=retain_graph)[0]
         return dgdx
 
-    def hard_update(self, new: FFN):
+    def hard_update(self, new):
+        """
+        Updates the weights of self with the weights of new.
+        """
         for old_p, new_p in zip(self.parameters(), new.parameters()):
             old_p.data.copy_(new_p.data)
 

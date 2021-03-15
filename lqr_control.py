@@ -7,9 +7,8 @@ import os
 import numpy as np
 from dataclasses import dataclass
 
-from control.pontryagin import Controlled_NSDE, LQR, RL_NSDE
-from lib.functions import Drift_linear, Diffusion_constant, QuadraticRunningCost, QuadraticFinalCost
-from lib.config import CoefsLQR
+from rl_nsde.control.pontryagin import Controlled_NSDE, LQR, RL_NSDE
+from rl_nsde.lib.config import CoefsLQR
 
 
 
@@ -33,12 +32,9 @@ def train(T: int,
     # create model
     coefs_lqr = CoefsLQR(sigma=sigma, d=d, device=device)
 
-    fbsde = FBSDE(d=d, 
+    fbsde = LQR(d=d, 
             ffn_hidden=ffn_hidden, 
-            drift=drift_lqr, 
-            diffusion=diffusion_lqr, 
-            running_cost=running_cost,
-            final_cost=final_cost)
+            **vars(coefs_lqr))
     fbsde.to(device)
     ts = torch.linspace(0, T, n_steps+1, device=device)
 
@@ -56,7 +52,7 @@ def train(T: int,
         for it in range(bsde_it):
             optimizer_bsde.zero_grad()
             x0 = sample_x0(batch_size=batch_size, d=d, device=device)
-            loss = fbsde.bsdeint(ts, x0)
+            loss = fbsde.fbsdeint(ts, x0)
             loss.backward()
             optimizer_bsde.step()
             count_updates += 1
@@ -90,7 +86,6 @@ if __name__=='__main__':
     # arguments for network architecture and for training
     parser.add_argument("--batch_size", default=100, type=int)
     parser.add_argument("--d", default=2, type=int)
-    parser.add_argument("--hidden_dims", default=[20,20], nargs="+", type=int)
     parser.add_argument("--max_updates", type=int, default=500)
     parser.add_argument('--ffn_hidden', default=[20,20,20], nargs="+", type=int, help="hidden sizes of ffn networks approximations")
     # arguments for LQR problem set up
