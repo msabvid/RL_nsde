@@ -26,7 +26,7 @@ class Controlled_NSDE(nn.Module):
         self.running_cost = self._running_cost(**kwargs)#QuadraticRunningCost(C=lqr_config['C'], D=lqr_config['D'], F=lqr_config['F'])
         self.final_cost = self._final_cost(**kwargs)#QuadraticFinalCost(R=lqr_config['R'])
         
-        self.alpha = FFN(sizes = [d] + ffn_hidden + [d]) # 
+        self.alpha = FFN(sizes = [d+1] + ffn_hidden + [d]) # +1 is for time
         self.Y = FFN(sizes = [d+1] + ffn_hidden + [d]) # Adjoint state. +1 is for time
         self.Z = FFN(sizes = [d+1] + ffn_hidden + [d*d]) # Diffusion of adjoint BSDE. It takes values in R^{d\times d}
         self.H = Hamiltonian(drift = self.drift, diffusion=self.diffusion, running_cost=self.running_cost)
@@ -79,10 +79,11 @@ class Controlled_NSDE(nn.Module):
         x = torch.zeros(batch_size, len(ts), self.d, device=device) # (batch_size, L, d)
         x[:,0,:], x_old = x0, x0
         actions = torch.zeros_like(brownian_increments) # (batch_size, L, d)
-        rewards = torch.zeros(batch_size, len(ts), 1)
+        rewards = torch.zeros(batch_size, len(ts), 1, device=device)
         for idx, t in enumerate(ts[:-1]):
             h = ts[idx+1]-ts[idx]
-            a = self.alpha(x_old)
+            current_t = torch.ones(batch_size,1, device=device)*t
+            a = self.alpha(current_t,x_old)
             # store action and reward
             actions[:,idx,:] = a
             rewards[:,idx,:] = self.running_cost(x_old, a)  
@@ -133,7 +134,8 @@ class Controlled_NSDE(nn.Module):
                 h = ts[idx+1] - ts[idx]
                 y = Y[:,idx,:]
                 with torch.no_grad():
-                    a = self.alpha(x[:,idx,:])
+                    current_t = t*torch.ones(batch_size, 1, device=device)
+                    a = self.alpha(current_t, x[:,idx,:])
                 z = Z[:,idx,:]
                 stoch_int = torch.bmm(Z[:,idx,...], brownian_increments[:,idx,:].unsqueeze(2)).squeeze(2) # (batch_size, d)
                 dHdx = self.H.dx(x=x[:,idx,:],
@@ -173,11 +175,20 @@ class Controlled_NSDE(nn.Module):
         for idx, t in enumerate(ts):
             current_t = t*torch.ones(batch_size, 1, device=device)
             y = Y[:,idx,:]
-            a = self.alpha(x[:,idx,:])
+            a = self.alpha(current_t, x[:,idx,:])
             z = Z[:,idx,:]
             H = self.H(x=x[:,idx,:],a=a,y=y,z=z)
             loss += H
         return loss.mean()
+    
+    def get_cost_episode(self, ts: torch.Tensor, x0: torch.Tensor):
+    
+        _,_,_, rewards = self.sdeint(ts, x0)
+        batch_size = x0.shape[0]
+        h = (ts[1:] - ts[:-1]).reshape(1,-1,1).repeat(batch_size, 1, 1) # (batch_size, L-1, 1)
+        running_cost = (rewards[:,:-1,:] * h).sum(1) # Riemann sum of integral of running cost. (batch_size, 1)
+        cost = running_cost + rewards[:,-1,:] # We sum terminal cost
+        return cost # (batch_size, 1)
 
             
             
@@ -253,7 +264,7 @@ class RL_NSDE(Controlled_NSDE):
         return FFN(sizes=[self.d+self.d] + self.ffn_hidden + [self.d])
     
     def _diffusion(self, **kwargs):
-        return FFN(sizes=[self.d+self.d] + self.ffn_hidden + [self.d]) # I consider the diffusion to be diagonal
+        return FFN(sizes=[self.d] + self.ffn_hidden + [self.d]) # I consider the diffusion to be diagonal
 
     def _running_cost(self, **kwargs):
         return QuadraticRunningCost(C=kwargs['C'], D=kwargs['D'], F=kwargs['F']) 
