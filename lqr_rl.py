@@ -11,6 +11,8 @@ import matplotlib.pyplot as plt
 from rl_nsde.control.pontryagin import Controlled_NSDE, LQR, RL_NSDE
 from rl_nsde.lib.config import CoefsLQR
 from rl_nsde.lib.utils import toggle
+from rl_nsde.control.lqr import riccati_ode, optimal_policy
+
 
 
 
@@ -60,10 +62,10 @@ def train(T: int,
         # improve nsde
         pbar.write("Improving nsde ...")
         lqr.alpha.hard_update(nsde.alpha)
+        toggle(nsde.alpha.parameters(), to=False)
+        toggle(parameters_bsde, to=False)
+        toggle(parameters_nsde, to=True)
         for it in range(nsde_it):
-            toggle(nsde.alpha.parameters(), to=False)
-            toggle(parameters_bsde, to=False)
-            toggle(parameters_nsde, to=True)
             optimizer_nsde.zero_grad()
             x0 = sample_x0(batch_size=batch_size, d=d, device=device)
             cost_lqr = lqr.get_cost_episode(ts=ts, x0=x0)
@@ -77,44 +79,48 @@ def train(T: int,
             loss_nsde_tracker.append(loss.detach().item())
         pbar.update(nsde_it)
         
-        for k in range(5):
-            # solve bsde
-            pbar.write("Solving BSDE...")
-            for it in range(bsde_it):
-                toggle(nsde.alpha.parameters(), to=False)
-                toggle(parameters_bsde, to=True)
-                toggle(parameters_nsde, to=False)
-                optimizer_bsde.zero_grad()
-                x0 = sample_x0(batch_size=batch_size, d=d, device=device)
-                loss = nsde.fbsdeint(ts, x0)
-                loss.backward()
-                optimizer_bsde.step()
-                count_updates += 1
-                pbar.write("loss bsde={:.4f}".format(loss.item()))
-                loss_bsde_tracker.append(loss.detach().item())
-            pbar.update(bsde_it)
-            # improve policy
-            pbar.write("Improving policy...")
-            for it in range(policy_it):
-                toggle(nsde.alpha.parameters(), to=True)
-                toggle(parameters_bsde, to=False)
-                toggle(parameters_nsde, to=False)
-                optimizer_policy.zero_grad()
-                x0 = sample_x0(batch_size=batch_size, d=d, device=device)
-                loss = nsde.loss_policy(ts, x0)
-                loss.backward()
-                optimizer_policy.step()
-                count_updates += 1
-                loss_alpha_tracker.append(loss.detach().item())
-                pbar.write("loss policy={:.4f}".format(loss.item()))
-            pbar.update(policy_it)
+        #for k in range(5):
+        # solve bsde
+        pbar.write("Solving BSDE...")
+        toggle(nsde.alpha.parameters(), to=False)
+        toggle(parameters_bsde, to=True)
+        toggle(parameters_nsde, to=False)
+        for it in range(bsde_it):
+            optimizer_bsde.zero_grad()
+            x0 = sample_x0(batch_size=batch_size, d=d, device=device)
+            loss = nsde.fbsdeint(ts, x0)
+            loss.backward()
+            optimizer_bsde.step()
+            count_updates += 1
+            pbar.write("loss bsde={:.4f}".format(loss.item()))
+            loss_bsde_tracker.append(loss.detach().item())
+        pbar.update(bsde_it)
+        # improve policy
+        pbar.write("Improving policy...")
+        # we use the Augmented Hamiltonian
+        nsde.policy_old.hard_update(nsde.alpha)
+        toggle(nsde.policy_old.parameters(), to=False)
+        toggle(nsde.alpha.parameters(), to=True)
+        toggle(parameters_bsde, to=False)
+        toggle(parameters_nsde, to=False)
+        for it in range(policy_it):
+            optimizer_policy.zero_grad()
+            x0 = sample_x0(batch_size=batch_size, d=d, device=device)
+            #loss = nsde.loss_policy(ts, x0)
+            loss = nsde.loss_policy_augmented_Hamiltonian(ts, x0, rho=0.1)
+            loss.backward()
+            optimizer_policy.step()
+            count_updates += 1
+            loss_alpha_tracker.append(loss.detach().item())
+            pbar.write("loss policy={:.4f}".format(loss.item()))
+        pbar.update(policy_it)
 
         if count_updates > max_updates:
             break
     result = {"state":nsde.state_dict()}
     torch.save(result, os.path.join(base_dir, "result.pth.tar"))
 
-    # plots
+    # plots Losses
     plt.plot(np.array(loss_nsde_tracker))
     plt.title("Loss nsde")
     plt.savefig(os.path.join(base_dir,"loss_nsde.pdf"))
@@ -127,6 +133,21 @@ def train(T: int,
     plt.title("Loss alpha")
     plt.savefig(os.path.join(base_dir,"loss_alpha.pdf"))
     plt.close()
+
+    # plots drift and diffusion
+    with torch.no_grad(): 
+        x0 = sample_x0(batch_size=batch_size, d=d, device=device)
+        x,brownian_increments, actions, reards = nsde.sdeint(ts, x0)
+        model_drift = nsde.drift(x[:,:-1,:], actions[:,:-1,:]) # (batch_size, L, d)
+        lqr_drift = torch.cat([lqr.drift(x[:,idx,:], actions[:,idx,:]).unsqueeze(1) for idx in range(actions.shape[1]-1)],1)
+        
+        model_diffusion = nsde.diffusion(x[:,:-1,:]) # (batch_size, L, d)
+        lqr_diffusion = torch.cat([lqr.diffusion(x[:,idx,:]).unsqueeze(1) for idx in range(actions.shape[1]-1)],1)
+
+    
+    S = riccati_ode(ts=ts, **vars(coefs_lqr))
+    optimal_pol = torch.cat([optimal_policy(coefs_lqr.D, coefs_lqr.M, S, x[:,idx,:]) for idx in range(actions.shape[1]-1)],1) 
+        
 
 
 

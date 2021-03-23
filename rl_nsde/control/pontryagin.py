@@ -3,11 +3,13 @@ import torch.nn as nn
 import signatory
 from typing import Tuple, Optional, List
 from abc import abstractmethod
+import copy
+from functools import partial
 
 from ..lib.networks import FFN
 from .functions import Hamiltonian, Drift_linear, Diffusion_constant, QuadraticRunningCost, QuadraticFinalCost
-
-
+from ..lib.utils import to_numpy
+from .lqr import riccati_ode, optimal_policy
 
 class Controlled_NSDE(nn.Module):
     """
@@ -27,6 +29,8 @@ class Controlled_NSDE(nn.Module):
         self.final_cost = self._final_cost(**kwargs)#QuadraticFinalCost(R=lqr_config['R'])
         
         self.alpha = FFN(sizes = [d+1] + ffn_hidden + [d]) # +1 is for time
+        self.policy_old = copy.deepcopy(self.alpha) # we will use this if we use the augmented Hamiltonian
+        
         self.Y = FFN(sizes = [d+1] + ffn_hidden + [d]) # Adjoint state. +1 is for time
         self.Z = FFN(sizes = [d+1] + ffn_hidden + [d*d]) # Diffusion of adjoint BSDE. It takes values in R^{d\times d}
         self.H = Hamiltonian(drift = self.drift, diffusion=self.diffusion, running_cost=self.running_cost)
@@ -47,7 +51,7 @@ class Controlled_NSDE(nn.Module):
     def _final_cost(self, **kwargs):
         ...
     
-    def sdeint(self, ts, x0):
+    def sdeint(self, ts, x0, brownian_increments = None):
         """
         Euler scheme to solve the SDE. Equivalent to playing an episode
         Parameters
@@ -58,6 +62,8 @@ class Controlled_NSDE(nn.Module):
             initial value of SDE. Tensor of shape (batch_size, d)
         brownian: Optional. 
             torch.tensor of shape (batch_size, L, d)
+        brownian_increments:
+            If not None, the brownian increments are given. They will be used to compare different policies on the same paths
         
         Returns
         -------
@@ -75,7 +81,9 @@ class Controlled_NSDE(nn.Module):
         """
         batch_size = x0.shape[0]
         device = x0.device
-        brownian_increments = torch.zeros(batch_size, len(ts), self.d, device=device) # (batch_size, L, d)
+        if brownian_increments == None:
+            brownian_increments = torch.randn(batch_size, len(ts)-1, self.d, device=device) * (ts[1:] - ts[:-1]).reshape(1,-1,1).sqrt()
+        #brownian_increments = torch.zeros(batch_size, len(ts), self.d, device=device) # (batch_size, L, d)
         x = torch.zeros(batch_size, len(ts), self.d, device=device) # (batch_size, L, d)
         x[:,0,:], x_old = x0, x0
         actions = torch.zeros_like(brownian_increments) # (batch_size, L, d)
@@ -88,8 +96,9 @@ class Controlled_NSDE(nn.Module):
             actions[:,idx,:] = a
             rewards[:,idx,:] = self.running_cost(x_old, a)  
             # step of Euler scheme of controlled sde
-            dW = torch.randn(batch_size, self.d, device=device)*torch.sqrt(h)
-            brownian_increments[:,idx,:] = dW #torch.randn(batch_size, self.d, device=device)*torch.sqrt(h)
+            #dW = torch.randn(batch_size, self.d, device=device)*torch.sqrt(h)
+            #brownian_increments[:,idx,:] = dW #torch.randn(batch_size, self.d, device=device)*torch.sqrt(h)
+            dW = brownian_increments[:,idx,:]
             x_new = x_old + self.drift(x_old, a)*h + self.diffusion(x_old)*dW
             x[:,idx+1,:] = x_new
             x_old = x_new
@@ -160,6 +169,8 @@ class Controlled_NSDE(nn.Module):
             timegrid. Vector of length N
         x0: torch.Tensor
             initial value of SDE. Tensor of shape (batch_size, d)
+        rho: float
+            Parameter of Augmented Hamiltonian
         """
         with torch.no_grad():
             x, brownian_increments, _, _ = self.sdeint(ts, x0)
@@ -172,14 +183,53 @@ class Controlled_NSDE(nn.Module):
             Z = self.Z(tx).view(batch_size, len(ts), self.d, self.d) # (batch_size, L, d, d)
         
         loss = 0
-        for idx, t in enumerate(ts):
+        for idx, t in enumerate(ts[:-1]):
             current_t = t*torch.ones(batch_size, 1, device=device)
             y = Y[:,idx,:]
             a = self.alpha(current_t, x[:,idx,:])
             z = Z[:,idx,:]
             H = self.H(x=x[:,idx,:],a=a,y=y,z=z)
-            loss += H
+            loss += H * (ts[idx+1]-ts[idx])
         return loss.mean()
+    
+    def loss_policy_augmented_Hamiltonian(self, ts: torch.Tensor, x0: torch.Tensor, rho: float):
+        """ 
+        We want to find
+        - argmin_{a} H(t,X,Y,Z,a) for all t, along the controlled sde
+        Parameters
+        ----------
+        ts: troch.Tensor
+            timegrid. Vector of length N
+        x0: torch.Tensor
+            initial value of SDE. Tensor of shape (batch_size, d)
+        rho: float
+            Parameter of Augmented Hamiltonian
+        policy_old: FFN
+            Copy of the old policy parametrisation, needed in the Augmented Hamiltonian
+        """
+        with torch.no_grad():
+            x, brownian_increments, _, _ = self.sdeint(ts, x0)
+        batch_size = x.shape[0]
+        device=x.device
+        t = ts.reshape(1,-1,1).repeat(batch_size,1,1)
+        tx = torch.cat([t,x],2)
+        with torch.no_grad():
+            Y = self.Y(tx) # (batch_size, L, d)
+            Z = self.Z(tx).view(batch_size, len(ts), self.d, self.d) # (batch_size, L, d, d)
+        
+        loss = 0
+        for idx, t in enumerate(ts[:-1]):
+            current_t = t*torch.ones(batch_size, 1, device=device)
+            y = Y[:,idx,:]
+            a = self.alpha(current_t, x[:,idx,:])
+            a_old = self.policy_old(current_t, x[:,idx,:])
+            z = Z[:,idx,:]
+            H = self.H(x=x[:,idx,:],a=a,y=y,z=z) # (batch_size, 1)
+            augmented_H = H + 0.5 * rho *((self.drift(x[:,idx,:], a) - self.drift(x[:,idx,:], a_old))**2).sum(1, keepdim=True)
+            augmented_H += 0.5 * rho * ((self.H.dx(x=x[:,idx,:],a=a_old, y=y, z=z, create_graph=False, retain_graph=False) - self.H.dx(x=x[:,idx,:],a=a,y=y,z=z, create_graph=True, retain_graph=True))**2).sum(1,keepdim=True)
+            loss += augmented_H * (ts[idx+1]-ts[idx])
+        return loss.mean()
+    
     
     def get_cost_episode(self, ts: torch.Tensor, x0: torch.Tensor):
     
@@ -220,6 +270,98 @@ class LQR(Controlled_NSDE):
     def _final_cost(self, **kwargs):
         return QuadraticFinalCost(R=kwargs['R'])
 
+
+class LQR_solved:
+
+    def __init__(self, d: int, **kwargs):
+        """
+        Initialisation of the LQR problem that we want to solve.
+        
+        Paramters
+        ---------
+        d: int
+            dim of the process
+        ffn_hidden: List[int]
+            hidden sizes of the Feedforward networks that parametrise the policy, Y, Z
+        kwargs: Dict with config of LQR
+        """
+        self.M = kwargs['M']
+        self.L = kwargs['L']
+        self.C = kwargs['C']
+        self.D = kwargs['D']
+        self.F = kwargs['F']
+        self.R = kwargs['R']
+        self.d = d
+    
+        self.drift = self._drift(**kwargs)#Drift_linear(L=lqr_config['L'], M=lqr_config['M'])
+        self.diffusion = self._diffusion(**kwargs)#Diffusion_constant(sigma=lqr_config['sigma'])
+        
+        self.running_cost = self._running_cost(**kwargs)#QuadraticRunningCost(C=lqr_config['C'], D=lqr_config['D'], F=lqr_config['F'])
+        self.final_cost = self._final_cost(**kwargs)#QuadraticFinalCost(R=lqr_config['R'])
+    
+    def _drift(self, **kwargs):
+        return Drift_linear(L=kwargs['L'], M=kwargs['M'])
+    
+    def _diffusion(self, **kwargs):
+        return Diffusion_constant(sigma=kwargs['sigma']) 
+
+    def _running_cost(self, **kwargs):
+        return QuadraticRunningCost(C=kwargs['C'], D=kwargs['D'], F=kwargs['F']) 
+
+    def _final_cost(self, **kwargs):
+        return QuadraticFinalCost(R=kwargs['R'])
+    
+    def sdeint(self, ts, x0, brownian_increments = None):
+        """
+        Euler scheme to solve the SDE with the optimal policy given by the analytical solution. Equivalent to playing an episode
+        Parameters
+        ----------
+        ts: torch.Tensor
+            timegrid. Vector of length L
+        x0: torch.Tensor
+            initial value of SDE. Tensor of shape (batch_size, d)
+        brownian_increments:
+            If not None, the brownian increments are given. They will be used to compare different policies on the same paths
+        
+        Returns
+        -------
+        x: torch.Tensor
+            Sample of sde. Tensor of shape (batch_size, L, d)
+        brownian_increments: torch.Tensor of shape (batch_size, L, d)
+        actions: torch.Tensor
+            Actions teaken. Tensor of shape (batch_size, L-1, d)
+        rewards: torch.Tensor
+            Rewards obtained. Tensor of shape (batch_size, L, 1). Last reward at index L is terminal cost
+            
+        Note
+        ----
+        I am assuming uncorrelated Brownian motion
+        """
+        batch_size = x0.shape[0]
+        device = x0.device
+        if brownian_increments == None:
+            brownian_increments = torch.randn(batch_size, len(ts)-1, self.d, device=device) * (ts[1:] - ts[:-1]).reshape(1,-1,1).sqrt()
+        x = torch.zeros(batch_size, len(ts), self.d, device=device) # (batch_size, L, d)
+        x[:,0,:], x_old = x0, x0
+        actions = torch.zeros_like(brownian_increments) # (batch_size, L, d)
+        rewards = torch.zeros(batch_size, len(ts), 1, device=device)
+        S = riccati_ode(L=self.L, M=self.M, C=self.C, D=self.D, R=self.R, ts=ts)
+
+        for idx, t in enumerate(ts[:-1]):
+            h = ts[idx+1]-ts[idx]
+            a = optimal_policy(x=x_old, D=self.D, M=self.M, S=S[idx])
+            # store action and reward
+            actions[:,idx,:] = a
+            rewards[:,idx,:] = self.running_cost(x_old, a)  
+            # step of Euler scheme of controlled sde
+            dW = brownian_increments[:,idx,:]
+            x_new = x_old + self.drift(x_old, a)*h + self.diffusion(x_old)*dW
+            x[:,idx+1,:] = x_new
+            x_old = x_new
+        # final reward
+        rewards[:,-1,:] = self.final_cost(x_old)
+        return x, brownian_increments, actions, rewards
+    
 
 class RL_IRL_NSDE(Controlled_NSDE):    
     
@@ -264,7 +406,7 @@ class RL_NSDE(Controlled_NSDE):
         return FFN(sizes=[self.d+self.d] + self.ffn_hidden + [self.d])
     
     def _diffusion(self, **kwargs):
-        return FFN(sizes=[self.d] + self.ffn_hidden + [self.d]) # I consider the diffusion to be diagonal
+        return FFN(sizes=[self.d] + self.ffn_hidden + [self.d], output_activation=nn.Softplus) # I consider the diffusion to be diagonal
 
     def _running_cost(self, **kwargs):
         return QuadraticRunningCost(C=kwargs['C'], D=kwargs['D'], F=kwargs['F']) 

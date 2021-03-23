@@ -1,5 +1,10 @@
+import numpy as np
+from scipy.integrate import odeint
+from functools import reduce
 import torch
 from abc import abstractmethod, ABC
+
+from ..lib.utils import to_numpy
 
 
 
@@ -18,6 +23,7 @@ class Func(ABC):
         gradient
         """
         ...
+
 
 
 class Drift_linear(Func):
