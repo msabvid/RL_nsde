@@ -6,7 +6,7 @@ from abc import abstractmethod
 import copy
 from functools import partial
 
-from ..lib.networks import FFN
+from ..lib.networks import FFN, Linear
 from .functions import Hamiltonian, Drift_linear, Diffusion_constant, QuadraticRunningCost, QuadraticFinalCost
 from ..lib.utils import to_numpy
 from .lqr import riccati_ode, optimal_policy
@@ -96,8 +96,6 @@ class Controlled_NSDE(nn.Module):
             actions[:,idx,:] = a
             rewards[:,idx,:] = self.running_cost(x_old, a)  
             # step of Euler scheme of controlled sde
-            #dW = torch.randn(batch_size, self.d, device=device)*torch.sqrt(h)
-            #brownian_increments[:,idx,:] = dW #torch.randn(batch_size, self.d, device=device)*torch.sqrt(h)
             dW = brownian_increments[:,idx,:]
             x_new = x_old + self.drift(x_old, a)*h + self.diffusion(x_old)*dW
             x[:,idx+1,:] = x_new
@@ -407,6 +405,37 @@ class RL_NSDE(Controlled_NSDE):
     
     def _diffusion(self, **kwargs):
         return FFN(sizes=[self.d] + self.ffn_hidden + [self.d], output_activation=nn.Softplus) # I consider the diffusion to be diagonal
+
+    def _running_cost(self, **kwargs):
+        return QuadraticRunningCost(C=kwargs['C'], D=kwargs['D'], F=kwargs['F']) 
+
+    def _final_cost(self, **kwargs):
+        return QuadraticFinalCost(R=kwargs['R'])
+
+
+class RL_Linear_NSDE(Controlled_NSDE):    
+    
+    """
+    Model-based RL. We learn the following from the data:
+        - The drift and the diffusion of the nsde
+            - We impose the drift to be linear on (x,a), and the diffusion to be constant
+        - The optimal policy
+    The running cost and the final cost are given.
+
+    lqr_config: Dict with config of LQR
+    """
+    
+    def __init__(self, d, ffn_hidden, **kwargs):
+        super().__init__(d=d, ffn_hidden=ffn_hidden, **kwargs)
+
+    def _drift(self, **kwargs):
+        return Linear(self.d+self.d, self.d)
+        #return FFN(sizes=[self.d+self.d] + self.ffn_hidden + [self.d])
+    
+    def _diffusion(self, **kwargs):
+        self.sigma = nn.Parameter(torch.tensor(1.))
+        return Diffusion_constant(self.sigma)
+        #return FFN(sizes=[self.d] + self.ffn_hidden + [self.d], output_activation=nn.Softplus) # I consider the diffusion to be diagonal
 
     def _running_cost(self, **kwargs):
         return QuadraticRunningCost(C=kwargs['C'], D=kwargs['D'], F=kwargs['F']) 

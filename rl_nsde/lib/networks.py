@@ -38,4 +38,12 @@ class FFN(nn.Module):
 
 
 
+class Linear(nn.Module):
 
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
+        self.net = nn.Linear(input_dim//2, output_dim, bias=False)
+
+    def forward(self, *args):
+        x = args[-1] #torch.cat(args, -1)
+        return self.net(x)

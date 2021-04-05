@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import numpy as np
 from typing import List
 
@@ -23,4 +24,8 @@ def to_numpy(tensor: torch.Tensor):
 
 def sample_x0(batch_size, d, device):
     x0 = -2 + 4*torch.rand(batch_size, d, device=device)
+    return x0
+
+def sample_ones(batch_size, d, device):
+    x0 = torch.ones(batch_size, d, device=device)
     return x0

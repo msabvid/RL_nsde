@@ -8,17 +8,12 @@ import numpy as np
 from dataclasses import dataclass
 import matplotlib.pyplot as plt
 
-from rl_nsde.control.pontryagin import Controlled_NSDE, LQR, RL_NSDE
+from rl_nsde.control.pontryagin import Controlled_NSDE, LQR, RL_NSDE, RL_Linear_NSDE
 from rl_nsde.lib.config import CoefsLQR
-from rl_nsde.lib.utils import toggle
-from rl_nsde.control.lqr import riccati_ode, optimal_policy
+from rl_nsde.lib.utils import toggle, init_weights, set_seed
+from rl_nsde.lib.utils import sample_ones as sample_x0
+from evaluate import evaluate
 
-
-
-
-def sample_x0(batch_size, d, device):
-    x0 = -2 + 4*torch.rand(batch_size, d, device=device)
-    return x0
 
 
 def train(T: int,
@@ -37,7 +32,9 @@ def train(T: int,
     # create model
     coefs_lqr = CoefsLQR(sigma=sigma, d=d, device=device)
     # we define the nsde
-    nsde = RL_NSDE(d=d, ffn_hidden=ffn_hidden, **vars(coefs_lqr))
+    #nsde = RL_NSDE(d=d, ffn_hidden=ffn_hidden, **vars(coefs_lqr))
+    nsde = RL_Linear_NSDE(d=d, ffn_hidden=ffn_hidden, **vars(coefs_lqr))
+    nsde.apply(init_weights)
     nsde.to(device)
     # we define the LQR
     lqr = LQR(d=d, ffn_hidden=ffn_hidden, **vars(coefs_lqr))
@@ -47,11 +44,14 @@ def train(T: int,
     ts = torch.linspace(0, T, n_steps+1, device=device)
 
     # optimizers
-    optimizer_policy = torch.optim.RMSprop(nsde.alpha.parameters(), lr=0.001)
+    optimizer_policy = torch.optim.RMSprop(nsde.alpha.parameters(), lr=0.0002)
+    scheduler_policy = torch.optim.lr_scheduler.StepLR(optimizer_policy, step_size=256, gamma=0.9)
     parameters_bsde = list(nsde.Y.parameters())+list(nsde.Z.parameters())
-    optimizer_bsde = torch.optim.RMSprop(parameters_bsde, lr=0.001)
+    optimizer_bsde = torch.optim.RMSprop(parameters_bsde, lr=0.0005)
+    scheduler_bsde = torch.optim.lr_scheduler.StepLR(optimizer_bsde, step_size = 500, gamma=0.9)
     parameters_nsde = list(nsde.drift.parameters()) + list(nsde.diffusion.parameters())
-    optimizer_nsde = torch.optim.RMSprop(parameters_nsde, lr=1e-3)
+    optimizer_nsde = torch.optim.RMSprop(parameters_nsde, lr=0.0005)
+    scheduler_nsde = torch.optim.lr_scheduler.StepLR(optimizer_nsde, step_size = 256, gamma=0.9)
 
     # Train
     pbar = tqdm.tqdm(total=max_updates)
@@ -74,80 +74,72 @@ def train(T: int,
             loss.backward()
             #torch.nn.utils.clip_grad_norm_(parameters_nsde, 1e4)
             optimizer_nsde.step()
+            scheduler_nsde.step()
             count_updates += 1
             pbar.write("loss nsde={:.4f}".format(loss.item()))
             loss_nsde_tracker.append(loss.detach().item())
         pbar.update(nsde_it)
-        
-        #for k in range(5):
-        # solve bsde
-        pbar.write("Solving BSDE...")
-        toggle(nsde.alpha.parameters(), to=False)
-        toggle(parameters_bsde, to=True)
-        toggle(parameters_nsde, to=False)
-        for it in range(bsde_it):
-            optimizer_bsde.zero_grad()
-            x0 = sample_x0(batch_size=batch_size, d=d, device=device)
-            loss = nsde.fbsdeint(ts, x0)
-            loss.backward()
-            optimizer_bsde.step()
-            count_updates += 1
-            pbar.write("loss bsde={:.4f}".format(loss.item()))
-            loss_bsde_tracker.append(loss.detach().item())
-        pbar.update(bsde_it)
-        # improve policy
-        pbar.write("Improving policy...")
-        # we use the Augmented Hamiltonian
-        nsde.policy_old.hard_update(nsde.alpha)
-        toggle(nsde.policy_old.parameters(), to=False)
-        toggle(nsde.alpha.parameters(), to=True)
-        toggle(parameters_bsde, to=False)
-        toggle(parameters_nsde, to=False)
-        for it in range(policy_it):
-            optimizer_policy.zero_grad()
-            x0 = sample_x0(batch_size=batch_size, d=d, device=device)
-            #loss = nsde.loss_policy(ts, x0)
-            loss = nsde.loss_policy_augmented_Hamiltonian(ts, x0, rho=0.1)
-            loss.backward()
-            optimizer_policy.step()
-            count_updates += 1
-            loss_alpha_tracker.append(loss.detach().item())
-            pbar.write("loss policy={:.4f}".format(loss.item()))
-        pbar.update(policy_it)
+        for k in range(2):
+            # solve bsde
+            pbar.write("Solving BSDE...")
+            toggle(nsde.alpha.parameters(), to=False)
+            toggle(parameters_bsde, to=True)
+            toggle(parameters_nsde, to=False)
+            for it in range(bsde_it):
+                optimizer_bsde.zero_grad()
+                x0 = sample_x0(batch_size=batch_size, d=d, device=device)
+                loss = nsde.fbsdeint(ts, x0)
+                loss.backward()
+                optimizer_bsde.step()
+                scheduler_bsde.step()
+                count_updates += 1
+                pbar.write("loss bsde={:.4f}".format(loss.item()))
+                loss_bsde_tracker.append(loss.detach().item())
+            pbar.update(bsde_it)
+            # improve policy
+            pbar.write("Improving policy...")
+            # we use the Augmented Hamiltonian
+            nsde.policy_old.hard_update(nsde.alpha)
+            toggle(nsde.policy_old.parameters(), to=False)
+            toggle(nsde.alpha.parameters(), to=True)
+            toggle(parameters_bsde, to=False)
+            toggle(parameters_nsde, to=False)
+            for it in range(policy_it):
+                optimizer_policy.zero_grad()
+                x0 = sample_x0(batch_size=batch_size, d=d, device=device)
+                loss = nsde.loss_policy(ts, x0)
+                #loss = nsde.loss_policy_augmented_Hamiltonian(ts, x0, rho=0.1)
+                loss.backward()
+                optimizer_policy.step()
+                scheduler_policy.step()
+                count_updates += 1
+                loss_alpha_tracker.append(loss.detach().item())
+                pbar.write("loss policy={:.4f}".format(loss.item()))
+            pbar.update(policy_it)
 
         if count_updates > max_updates:
             break
-    result = {"state":nsde.state_dict()}
+    result = {"state":nsde.state_dict(), "loss_nsde":loss_nsde_tracker,
+            "loss_bsde":loss_bsde_tracker, "loss_policy":loss_alpha_tracker}
     torch.save(result, os.path.join(base_dir, "result.pth.tar"))
 
     # plots Losses
-    plt.plot(np.array(loss_nsde_tracker))
-    plt.title("Loss nsde")
-    plt.savefig(os.path.join(base_dir,"loss_nsde.pdf"))
+    fig = plt.figure(figsize=(10,4))
+    ax = plt.subplot(131)
+    ax.plot(np.array(loss_nsde_tracker))
+    ax.set_title("Loss nsde")
+    ax.set_yscale("log")
+    ax = plt.subplot(132)
+    ax.plot(np.array(loss_bsde_tracker))
+    ax.set_yscale("log")
+    ax.set_title("Loss bsde")
+    ax = plt.subplot(133)
+    ax.plot(np.array(loss_alpha_tracker))
+    ax.set_title("Loss alpha")
+    fig.tight_layout()
+    fig.savefig(os.path.join(base_dir,"losses.pdf"))
     plt.close()
-    plt.plot(np.array(loss_bsde_tracker))
-    plt.title("Loss bsde")
-    plt.savefig(os.path.join(base_dir,"loss_bsde.pdf"))
-    plt.close()
-    plt.plot(np.array(loss_alpha_tracker))
-    plt.title("Loss alpha")
-    plt.savefig(os.path.join(base_dir,"loss_alpha.pdf"))
-    plt.close()
-
-    # plots drift and diffusion
-    with torch.no_grad(): 
-        x0 = sample_x0(batch_size=batch_size, d=d, device=device)
-        x,brownian_increments, actions, reards = nsde.sdeint(ts, x0)
-        model_drift = nsde.drift(x[:,:-1,:], actions[:,:-1,:]) # (batch_size, L, d)
-        lqr_drift = torch.cat([lqr.drift(x[:,idx,:], actions[:,idx,:]).unsqueeze(1) for idx in range(actions.shape[1]-1)],1)
-        
-        model_diffusion = nsde.diffusion(x[:,:-1,:]) # (batch_size, L, d)
-        lqr_diffusion = torch.cat([lqr.diffusion(x[:,idx,:]).unsqueeze(1) for idx in range(actions.shape[1]-1)],1)
-
-    
-    S = riccati_ode(ts=ts, **vars(coefs_lqr))
-    optimal_pol = torch.cat([optimal_policy(coefs_lqr.D, coefs_lqr.M, S, x[:,idx,:]) for idx in range(actions.shape[1]-1)],1) 
-        
+    evaluate(ts=ts, d=d, coefs_lqr=coefs_lqr, control_problem=nsde, device=device, base_dir=base_dir)    
 
 
 
@@ -184,6 +176,8 @@ if __name__=='__main__':
     results_path = os.path.join(args.base_dir, 'lqr_rl')
     if not os.path.exists(results_path):
         os.makedirs(results_path)
+
+    set_seed(args.seed)
     
     train(T=args.T,
             n_steps=args.n_steps,

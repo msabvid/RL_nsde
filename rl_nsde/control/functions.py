@@ -76,6 +76,9 @@ class Diffusion_constant(Func):
     def dx(self, x):
         pass
 
+    def parameters(self):
+        return (self.sigma,)
+
 
 class Hamiltonian(Func):
 

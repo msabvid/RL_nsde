@@ -37,9 +37,15 @@ def evaluate(ts: torch.Tensor,
     value_solved = (rewards_solved[:,:-1,:]*increments).sum(1) + rewards_solved[:,-1,:]
     value_solved = to_numpy(value_solved)
 
-    plt.hist(value, label="DL", alpha=0.5, bins=100)
-    plt.hist(value_solved, label="analytical solution", alpha=0.5, bins=100)
+    np.save(os.path.join(base_dir,"value.npy"), value)
+    np.save(os.path.join(base_dir,"value_solved.npy"), value_solved)
+    
+    fig = plt.figure()
+    plt.hist(value, label="DL optimal policy", alpha=0.5, bins=100)
+    plt.hist(value_solved, label="analytical optimal policy", alpha=0.5, bins=100)
     plt.legend()
+    plt.xlabel(r"$\int_0^T \hat f_t(\hat X_t^{\alpha,x}, \alpha_t)\,dt + \hat g(\hat X_T^{\alpha,x})$")
+    plt.ylabel("count")
     plt.savefig(os.path.join(base_dir, 'hist_values.pdf'))
     
 
